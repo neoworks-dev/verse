@@ -1,0 +1,53 @@
+# Maintainer: Moritz Utcke <moritz.utcke@ib-cornelsen.de>
+#
+# Verse is built from the working tree this file sits in, so `makepkg -si` run
+# from here packages what is checked out.
+
+pkgname=verse
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Hold a hotkey, talk, and have it typed: local speech to text for Wayland"
+arch=('x86_64')
+url="https://neoworks.dev"
+license=('MIT' 'OFL-1.1')
+depends=(
+	# Typing the transcript into the focused window.
+	'wtype'
+	# Recording, through ALSA (PipeWire and PulseAudio provide it).
+	'alsa-lib'
+	# whisper.cpp runs on the GPU through Vulkan.
+	'vulkan-icd-loader'
+	# Keyboard input in the menu. The overlay speaks Wayland itself and draws on the CPU.
+	'libxkbcommon'
+	'gcc-libs'
+	'glibc'
+)
+makedepends=('cargo' 'cmake' 'clang' 'shaderc' 'vulkan-headers')
+optdepends=(
+	'libnotify: error messages as desktop notifications'
+	'wl-clipboard: copy and paste in the menu'
+)
+# makepkg's LTO flags reach whisper.cpp's CMake build, which then fails to link.
+options=('!lto' '!debug')
+
+build() {
+	cd "$startdir/.."
+	cargo build --release --locked --features vulkan
+}
+
+check() {
+	cd "$startdir/.."
+	cargo test --release --locked --features vulkan
+}
+
+package() {
+	cd "$startdir/.."
+	local target="${CARGO_TARGET_DIR:-target}"
+
+	install -Dm755 "$target/release/verse" "$pkgdir/usr/bin/verse"
+	install -Dm644 packaging/verse.desktop "$pkgdir/usr/share/applications/verse.desktop"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	# Geist is compiled into the binary.
+	install -Dm644 assets/fonts/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/Geist-OFL.txt"
+}

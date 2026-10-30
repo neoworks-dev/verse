@@ -1,0 +1,31 @@
+[package]
+name = "verse"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# GPU inference through whisper.cpp's Vulkan backend (NVIDIA and AMD alike).
+vulkan = ["whisper-rs/vulkan"]
+cuda = ["whisper-rs/cuda"]
+
+[dependencies]
+anyhow = "1.0.104"
+cpal = "0.18.2"
+dirs = "7.0.0"
+# The settings menu, drawn on the CPU by src/menu/raster.rs.
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts"] }
+libc = "0.2.191"
+rphonetic = "4.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+smithay-client-toolkit = "0.21.1"
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+toml = "1.1.8"
+ureq = "3.5.0"
+wayland-client = "0.31.15"
+whisper-rs = "0.16.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

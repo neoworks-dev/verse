@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Verse
+GenericName=Speech to text
+Comment=Pick a model, vocabulary and appearance for dictation
+Exec=verse settings
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;transcribe;whisper;voice;speech;
+StartupWMClass=verse

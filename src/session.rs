@@ -27,7 +27,8 @@ use crate::{
 static STOP: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
-const TICK: Duration = Duration::from_millis(33);
+// 60 fps, so the waveform scrolls smoothly.
+const TICK: Duration = Duration::from_millis(16);
 
 extern "C" fn on_signal(sig: libc::c_int) {
     if sig == libc::SIGUSR1 {
@@ -65,7 +66,17 @@ pub fn signal(sig: libc::c_int) -> Result<()> {
 }
 
 pub fn start() -> Result<()> {
+    // The hotkey closes the menu when it is open, rather than doing nothing.
+    if let Some(pid) = running_pid().filter(|_| menu_marker().exists()) {
+        unsafe { libc::kill(pid, libc::SIGUSR2) };
+        return Ok(());
+    }
     exclusive(record)
+}
+
+/// Exists while the running session shows the menu.
+fn menu_marker() -> PathBuf {
+    pid_path().with_extension("menu")
 }
 
 /// `verse settings [page]`: the pill with its menu open, without recording.
@@ -94,6 +105,8 @@ fn exclusive(session: impl FnOnce() -> Result<()>) -> Result<()> {
         }
     }
     fs::write(pid_path(), std::process::id().to_string())?;
+    // A marker left by a session that crashed would make the hotkey cancel this one.
+    let _ = fs::remove_file(menu_marker());
     let result = session();
     let _ = fs::remove_file(pid_path());
     if let Err(err) = &result {
@@ -106,14 +119,18 @@ fn exclusive(session: impl FnOnce() -> Result<()>) -> Result<()> {
 /// recording (`stop`) is ignored here, since the hotkey may still be held when the button is clicked.
 fn menu(mut overlay: Overlay, page: Page) -> Result<()> {
     overlay.open_menu(page)?;
-    loop {
-        overlay.pump(TICK)?;
-        if overlay.menu_closed() || overlay.take_button_click() || overlay.closed() || CANCEL.load(Ordering::Relaxed) {
-            break;
+    let _ = fs::write(menu_marker(), "");
+    let result = (|| {
+        loop {
+            overlay.pump(TICK)?;
+            if overlay.menu_closed() || overlay.take_button_click() || overlay.closed() || CANCEL.load(Ordering::Relaxed) {
+                return Ok(());
+            }
         }
-    }
+    })();
+    let _ = fs::remove_file(menu_marker());
     overlay.hide();
-    Ok(())
+    result
 }
 
 fn record() -> Result<()> {

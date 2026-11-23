@@ -2,7 +2,11 @@
 //! No toolkit and no GPU context, so it costs a couple of megabytes while visible. Its button
 //! opens the settings menu right above it.
 
-use std::{collections::VecDeque, os::fd::AsRawFd, time::Duration};
+use std::{
+    collections::VecDeque,
+    os::fd::AsRawFd,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
@@ -44,10 +48,12 @@ const BOTTOM_MARGIN: i32 = 48;
 /// Space between the pill and the menu above it.
 const MENU_GAP: i32 = 10;
 const BARS: usize = 13;
-/// Each bar's height relative to the others, so the waveform has a shape even in silence.
-const SHAPE: [f32; BARS] = [0.35, 0.6, 0.85, 0.5, 0.95, 0.65, 1.0, 0.55, 0.8, 0.45, 0.7, 0.5, 0.3];
-/// How tall the bars stand while it's quiet, as a share of their full height.
-const IDLE: f32 = 0.22;
+/// Each bar is this much audio, so the pill shows about the last second.
+const BAR_INTERVAL: Duration = Duration::from_millis(80);
+/// The quietest peak the bars are scaled to (RMS), and how many decibels below the peak a bar
+/// shrinks to nothing.
+const PEAK_FLOOR: f32 = 0.03;
+const RANGE_DB: f32 = 24.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -87,7 +93,14 @@ pub(crate) struct State {
 
     theme: Theme,
     phase: Phase,
+    /// Loudness of the last `BARS` slices of audio, oldest first.
     levels: VecDeque<f32>,
+    /// The slice being recorded now: its summed power over `samples` readings, and when it started.
+    power: f32,
+    samples: u32,
+    current_since: Instant,
+    /// The loudest recent slice, which the bars are scaled to.
+    peak: f32,
     frame: u32,
 }
 
@@ -133,6 +146,10 @@ impl Overlay {
             theme,
             phase: Phase::Recording,
             levels: VecDeque::from(vec![0.0; BARS]),
+            power: 0.0,
+            samples: 0,
+            current_since: Instant::now(),
+            peak: PEAK_FLOOR,
             frame: 0,
         };
         Ok(Self { conn, queue, state })
@@ -175,12 +192,18 @@ impl Overlay {
     }
 
     pub fn push_level(&mut self, rms: f32) {
-        // Speech RMS sits around 0.01–0.2; the square root spreads that over the bar height.
-        let level = (rms * 6.0).sqrt().min(1.0);
-        // Fall off gently instead of dropping to nothing between syllables.
-        let last = self.state.levels.back().copied().unwrap_or(0.0);
-        self.state.levels.pop_front();
-        self.state.levels.push_back(level.max(last * 0.75));
+        let state = &mut self.state;
+        state.power += rms * rms;
+        state.samples += 1;
+        // Once a slice is over it becomes a bar on the right and the rest move left.
+        while state.current_since.elapsed() >= BAR_INTERVAL {
+            let level = state.slice_level();
+            state.levels.pop_front();
+            state.levels.push_back(level);
+            state.power = 0.0;
+            state.samples = 0;
+            state.current_since += BAR_INTERVAL;
+        }
     }
 
     pub fn set_phase(&mut self, phase: Phase) {
@@ -342,25 +365,49 @@ impl State {
             bars.set_alpha(0.45);
         }
         paint.set_color(bars);
-        for i in 0..BARS {
-            let level = match self.phase {
-                // A slow travelling wave while whisper works.
-                Phase::Processing => {
-                    let phase = self.frame as f32 * 0.18 - i as f32 * 0.55;
-                    0.15 + 0.35 * (0.5 + 0.5 * phase.sin())
-                }
-                Phase::Menu => SHAPE[i] * IDLE,
-                // The newest audio enters on the right. Each bar keeps its own height, and a
-                // slight breathing keeps the pill alive while you're quiet.
-                Phase::Recording => {
-                    let breath = 0.04 * (self.frame as f32 * 0.12 + i as f32 * 1.3).sin();
-                    SHAPE[i] * (IDLE + breath + (1.0 - IDLE) * self.levels[i])
-                }
-            };
+        let line_at = |pixmap: &mut Pixmap, paint: &Paint, x: f32, level: f32| {
             let half = 2.0 + level * max_half;
-            let x = left + i as f32 * gap;
-            pixmap.stroke_path(&line(x, cy - half, x, cy + half), &paint, &round(2.6), t, None);
+            pixmap.stroke_path(&line(x, cy - half, x, cy + half), paint, &round(2.6), t, None);
+        };
+        match self.phase {
+            // A slow travelling wave while whisper works.
+            Phase::Processing => {
+                for i in 0..BARS {
+                    let phase = self.frame as f32 * 0.18 - i as f32 * 0.55;
+                    line_at(pixmap, &paint, left + i as f32 * gap, 0.15 + 0.35 * (0.5 + 0.5 * phase.sin()));
+                }
+            }
+            Phase::Menu => {
+                for i in 0..BARS {
+                    line_at(pixmap, &paint, left + i as f32 * gap, 0.0);
+                }
+            }
+            // The audio flows left: bars slide one gap per slice, the oldest fading out on the
+            // left while the slice being recorded fades in on the right, already as loud as it is.
+            Phase::Recording => {
+                let shift = (self.current_since.elapsed().as_secs_f32() / BAR_INTERVAL.as_secs_f32()).min(1.0);
+                let current = (self.power / self.samples.max(1) as f32).sqrt();
+                let current = (1.0 + 20.0 * (current.max(1e-6) / self.peak).log10() / RANGE_DB).clamp(0.0, 1.0);
+                let levels = self.levels.iter().copied().chain([current]);
+                for (i, level) in levels.enumerate() {
+                    let x = left + (i as f32 - shift) * gap;
+                    let outside = (left - x).max(x - right).max(0.0);
+                    let mut color = bars;
+                    color.set_alpha(bars.alpha() * (1.0 - outside / gap).clamp(0.0, 1.0));
+                    paint.set_color(color);
+                    line_at(pixmap, &paint, x, level);
+                }
+            }
         }
+    }
+
+    /// The current slice's height: its loudness in decibels below the recent peak. The peak
+    /// fades over a few seconds, so the bars use their height whatever the mic's gain is.
+    fn slice_level(&mut self) -> f32 {
+        let rms = (self.power / self.samples.max(1) as f32).sqrt();
+        self.peak = (self.peak * 0.97).max(rms).max(PEAK_FLOOR);
+        let db = 20.0 * (rms.max(1e-6) / self.peak).log10();
+        (1.0 + db / RANGE_DB).clamp(0.0, 1.0)
     }
 
     fn menu_for(&mut self, surface: &wl_surface::WlSurface) -> Option<&mut Menu> {

@@ -34,7 +34,6 @@ pub struct Menu {
     canvas: Canvas,
     settings: ui::Settings,
     modifiers: Modifiers,
-    had_focus: bool,
 }
 
 impl Menu {
@@ -58,7 +57,7 @@ impl Menu {
             click_through: false,
         };
         let canvas = Canvas::new(compositor, layer_shell, shm, qh, settings.theme(), options)?;
-        Ok(Self { canvas, settings, modifiers: Modifiers::default(), had_focus: false })
+        Ok(Self { canvas, settings, modifiers: Modifiers::default() })
     }
 
     pub fn surface(&self) -> &WlSurface {
@@ -69,9 +68,10 @@ impl Menu {
         self.canvas.is_layer(layer)
     }
 
-    /// The user closed it, or clicked somewhere else after using it.
+    /// The user closed it. Losing keyboard focus doesn't count: with focus following the
+    /// mouse (Hyprland's default), merely moving the pointer off the menu takes it away.
     pub fn closed(&self) -> bool {
-        self.settings.closed || (self.had_focus && !self.canvas.focused)
+        self.settings.closed
     }
 
     pub fn theme(&self) -> crate::config::Theme {
@@ -120,7 +120,6 @@ impl Menu {
 
     pub fn focus(&mut self, focused: bool) {
         self.canvas.focused = focused;
-        self.had_focus |= focused;
         self.canvas.push(Event::WindowFocused(focused));
     }
 
